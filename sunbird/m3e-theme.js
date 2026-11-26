@@ -1,126 +1,194 @@
-// @description Material 3 Expressive-inspired chat controls and message actions for Android Phoenix.
-// @version 0.1.0
+// @description Lampcord-inspired chat input, toolbar icons and grouped message menus for Android Phoenix.
+// @version 0.2.0
 // @author onichan0923
 
 (() => {
   const ui = phoenix.ui;
-  const schemes = {
+  // Fixed surface roles for clients without access to Android's dynamic palette.
+  const palettes = {
     dark: {
-      surface: 0xff302c38, text: 0xfff1eaf7, muted: 0xffcfc3d5, outline: 0xff978b9f,
-      primary: 0xffd8b9ff, primaryContainer: 0xff533b70, onPrimaryContainer: 0xfff1dbff,
-      primaryPressed: 0xff674f84, tertiaryContainer: 0xff633c4e, onTertiaryContainer: 0xffffd8e8,
-      tertiaryPressed: 0xff795164, row: 0x16d8b9ff, rowPressed: 0x39d8b9ff,
+      sheet: 0xff151419, row: 0xff211f25, rowPressed: 0xff35323b,
+      input: 0xff2b292f, ink: 0xffe7e1e6, icon: 0xffcac5cf, muted: 0xffa39ea9,
+      outline: 0x0acac5cf, accent: 0xffcfbcff, onAccent: 0xff381e72,
+      ripple: 0x20cac5cf, handle: 0x66cac5cf,
     },
     light: {
-      surface: 0xfff4edf8, text: 0xff201b24, muted: 0xff4e4555, outline: 0xff796d82,
-      primary: 0xff684588, primaryContainer: 0xffeedbff, onPrimaryContainer: 0xff34164f,
-      primaryPressed: 0xffdfc5f4, tertiaryContainer: 0xffffd8e8, onTertiaryContainer: 0xff471c31,
-      tertiaryPressed: 0xffefc3d5, row: 0x15684588, rowPressed: 0x30684588,
+      sheet: 0xfffdf8fd, row: 0xfff1edf3, rowPressed: 0xffe1dce4,
+      input: 0xffebe6ec, ink: 0xff1d1b20, icon: 0xff49454f, muted: 0xff69646f,
+      outline: 0x33c7c5d0, accent: 0xff6750a4, onAccent: 0xffffffff,
+      ripple: 0x1849454f, handle: 0x6649454f,
     },
   };
-  const actionPrefix = "message.actions.";
   const menuRoot = "message.actions.root";
-  const actionMatch = { prefix: actionPrefix };
-  let scheme;
+  const menuMatch = { prefix: "message.actions." };
+  const sendNames = ["composer.send", "Send Message"];
+  const toolbarButtons = ["composer.expressions", "composer.gift", "Record Voice Message", ...sendNames];
+  let palette;
   let rules = [];
   const watchers = [];
 
-  function isAction(node) {
-    const aid = node && node.accessibilityId;
-    return typeof aid === "string" && aid.startsWith(actionPrefix) && aid !== menuRoot;
-  }
-
-  function styleAction(node, first, last) {
-    const top = first ? 20 : 5;
-    const bottom = last ? 20 : 5;
-    ui.update(node.id, {
-      background: scheme.row, activeBackground: scheme.rowPressed,
-      radiusTopLeft: top, radiusTopRight: top,
-      radiusBottomLeft: bottom, radiusBottomRight: bottom,
-    });
-  }
-
-  // Consecutive action rows form one shape. Dividers or other siblings start
-  // a new group. Preserve the original icon, label and destructive-action color.
-  function styleMenuRow(node, includeNeighbors) {
-    const parent = node.parent == null ? null : ui.node(node.parent);
-    const siblings = parent ? parent.children : [];
-    const index = siblings.indexOf(node.id);
-    if (index < 0) {
-      styleAction(node, true, true);
-      return;
-    }
-    const at = i => i >= 0 && i < siblings.length ? ui.node(siblings[i]) : null;
-    const before = at(index - 1);
-    const after = at(index + 1);
-    styleAction(node, !isAction(before), !isAction(after));
-    if (includeNeighbors && isAction(before)) styleAction(before, !isAction(at(index - 2)), false);
-    if (includeNeighbors && isAction(after)) styleAction(after, false, !isAction(at(index + 2)));
-  }
-
-  function styleSheet(anchor) {
-    const id = anchor.kind === "sheet" ? anchor.id : anchor.sheet;
-    if (id != null) {
-      ui.update(id, { radiusTopLeft: 28, radiusTopRight: 28, handleColor: scheme.primary });
-    }
-  }
-
-  function tintButtonIcon(node) {
-    // Phoenix's search and expression button templates put the icon first.
-    if (node.children.length === 0) return;
-    const image = ui.node(node.children[0]);
-    if (image && (image.kind == null || image.kind === "image")) {
-      const tint = node.accessibilityId === "search.entry"
-        ? scheme.onPrimaryContainer : scheme.onTertiaryContainer;
-      ui.update(image.id, { tint });
-    }
-  }
-
-  function forLive(match, callback) {
+  function forLive(match, visit) {
     for (const id of ui.find(match)) {
       const node = ui.node(id);
-      if (node) callback(node);
+      if (node) visit(node);
     }
   }
 
-  function watch(match, callback) {
+  function watch(match, visit) {
     watchers.push(ui.onNode(match, snapshot => {
       const node = ui.node(snapshot.id);
-      if (node && node.accessibilityId === snapshot.accessibilityId) callback(node);
+      if (node && node.accessibilityId === snapshot.accessibilityId) visit(node);
     }));
   }
 
+  function patch(match, props) {
+    rules.push(ui.patchProps(match, props));
+    forLive(match, node => ui.update(node.id, props));
+  }
+
+  function tintIcon(button, color = palette.icon) {
+    // Search and expressions use Phoenix's icon-button template.
+    if (!button.children.length) return;
+    const icon = ui.node(button.children[0]);
+    if (icon && (icon.kind == null || icon.kind === "image")) {
+      ui.update(icon.id, { tint: color });
+    }
+  }
+
+  function toolbarControls(group, inputId) {
+    if (group.id === ui.root()) return null;
+    const pending = [group.id];
+    const seen = new Set();
+    let hasInput = false;
+    let hasAction = false;
+    const sendButtons = [];
+    while (pending.length) {
+      const id = pending.pop();
+      if (seen.has(id)) continue;
+      seen.add(id);
+      if (seen.size > 72) return null;
+      const node = ui.node(id);
+      if (!node || ["navigator", "list", "sheet", "scroll"].includes(node.kind)) return null;
+      const name = node.accessibilityId;
+      if (id === inputId) hasInput = true;
+      else if (toolbarButtons.includes(name)) {
+        hasAction = true;
+        if (sendNames.includes(name)) sendButtons.push(node);
+      } else if (name && !name.toLowerCase().includes("composer")
+        && (id === group.id || node.children.length > 1 || /^(message\.|channel|profile|search\.)/.test(name))) {
+        return null;
+      }
+      for (const child of node.children) pending.push(child);
+    }
+    return hasInput && hasAction ? sendButtons : null;
+  }
+
+  function styleComposer(input) {
+    // Find the nearest compact group containing both input and tools. Leave
+    // unfamiliar layouts alone instead of painting the entire chat screen.
+    let parentId = input.parent;
+    for (let depth = 0; depth < 4 && parentId != null; depth++) {
+      const group = ui.node(parentId);
+      if (!group) return;
+      const sendButtons = toolbarControls(group, input.id);
+      if (sendButtons) {
+        ui.update(group.id, {
+          background: palette.input, radius: 16, borderWidth: 1, borderColor: palette.outline,
+          minHeight: 60, padding: [12, 8, 12, 8], gap: 8,
+        });
+        for (const send of sendButtons) {
+          ui.update(send.id, { background: palette.accent, radius: 20 });
+          tintIcon(send, palette.onAccent);
+        }
+        return;
+      }
+      parentId = group.parent;
+    }
+  }
+
+  function isAction(node) {
+    const name = node && node.accessibilityId;
+    return typeof name === "string" && name.startsWith(menuMatch.prefix) && name !== menuRoot;
+  }
+
+  function isDivider(node) {
+    // Sunbird's menu template inserts an anonymous view containing one line
+    // between actions. Named separators and headings stay group boundaries.
+    if (!node || node.accessibilityId || (node.kind != null && node.kind !== "view")
+      || node.children.length !== 1) return false;
+    const line = ui.node(node.children[0]);
+    return !!line && !line.accessibilityId && (line.kind == null || line.kind === "view")
+      && line.children.length === 0;
+  }
+
+  function styleMenuRow(node, includeNeighbors) {
+    const parent = node.parent == null ? null : ui.node(node.parent);
+    const siblings = parent ? parent.children : [];
+    const at = i => i >= 0 && i < siblings.length ? ui.node(siblings[i]) : null;
+    const adjacent = (i, step) => {
+      const near = at(i + step);
+      const j = i + (isDivider(near) ? 2 * step : step);
+      return isAction(at(j)) ? j : -1;
+    };
+    const style = (row, before, after) => {
+      if (!isAction(row)) return;
+      ui.update(row.id, {
+        background: palette.row, activeBackground: palette.rowPressed,
+        radiusTopLeft: before ? 5 : 20, radiusTopRight: before ? 5 : 20,
+        radiusBottomLeft: after ? 5 : 20, radiusBottomRight: after ? 5 : 20,
+        margin: [0, 0, 0, after ? 4 : 0],
+      });
+    };
+    const i = siblings.indexOf(node.id);
+    if (i < 0) return style(node, false, false);
+    const prev = adjacent(i, -1);
+    const next = adjacent(i, 1);
+    style(node, prev >= 0, next >= 0);
+    if (i === 0 && parent && parent.accessibilityId !== menuRoot
+      && siblings.every(id => { const n = ui.node(id); return isAction(n) || isDivider(n); })) {
+      ui.update(parent.id, { radius: 20, background: 0 });
+    }
+    if (includeNeighbors && prev >= 0) style(at(prev), adjacent(prev, -1) >= 0, true);
+    if (includeNeighbors && next >= 0) style(at(next), true, adjacent(next, 1) >= 0);
+  }
+
+  function styleMenu(node, includeNeighbors) {
+    if (node.accessibilityId !== menuRoot) {
+      styleMenuRow(node, includeNeighbors);
+      return;
+    }
+    const sheet = node.kind === "sheet" ? node.id : node.sheet;
+    if (sheet != null) {
+      ui.update(sheet, {
+        background: palette.sheet, radiusTopLeft: 24, radiusTopRight: 24,
+        handleColor: palette.handle, scrimColor: 0x99000000,
+      });
+    }
+  }
+
   function apply(choice) {
-    scheme = choice === "light" ? schemes.light : schemes.dark;
+    palette = choice === "light" ? palettes.light : palettes.dark;
     for (const remove of rules) remove();
     rules = [];
-    const input = {
-      background: scheme.surface, color: scheme.text, placeholderColor: scheme.muted,
-      borderWidth: 1, borderColor: scheme.outline, focusBorderColor: scheme.primary, radius: 24,
-    };
-    // activeRadius is a float on Android. A fractional value also makes older
-    // JS bridges encode it as a float when they don't recognize the prop type.
-    const search = {
-      background: scheme.primaryContainer, activeBackground: scheme.primaryPressed,
-      radius: 24, activeRadius: 12.5,
-    };
-    const expressions = {
-      background: scheme.tertiaryContainer, activeBackground: scheme.tertiaryPressed,
-      radius: 14, activeRadius: 8.5,
-    };
-    for (const [match, props] of [
-      ["composer", input], ["user_settings_search_input", input],
-      ["search.entry", search], ["composer.expressions", expressions],
-    ]) {
-      rules.push(ui.patchProps(match, props));
-      forLive(match, node => ui.update(node.id, props));
-    }
-    forLive("search.entry", tintButtonIcon);
-    forLive("composer.expressions", tintButtonIcon);
-    forLive(actionMatch, node => {
-      if (node.accessibilityId === menuRoot) styleSheet(node);
-      else styleMenuRow(node, false);
+    // The outer toolbar owns the fill. Clear any 0.1 input/button backgrounds
+    // on a live upgrade, including when the emoji button has been hidden.
+    patch("composer", {
+      background: 0, borderWidth: 0, borderColor: 0, focusBorderColor: 0, radius: 0,
+      color: palette.ink, placeholderColor: palette.muted,
     });
+    patch("user_settings_search_input", {
+      background: palette.input, color: palette.ink, placeholderColor: palette.muted,
+      radius: 16, borderWidth: 1, borderColor: palette.outline, focusBorderColor: palette.accent,
+    });
+    const iconButton = { background: 0, activeBackground: palette.ripple, radius: 20, activeRadius: 20.5 };
+    for (const name of ["search.entry", "composer.expressions"]) {
+      patch(name, iconButton);
+      forLive(name, tintIcon);
+    }
+    patch({ prefix: "message.author:" }, { fontWeight: 700 });
+    patch({ prefix: "message.timestamp:" }, { color: palette.muted });
+    forLive("composer", styleComposer);
+    forLive(menuMatch, node => styleMenu(node, false));
   }
 
   const settings = phoenix.settings.define({
@@ -130,12 +198,21 @@
       onChange: apply,
     },
   });
-  watch("search.entry", tintButtonIcon);
-  watch("composer.expressions", tintButtonIcon);
-  watch(actionMatch, node => {
-    if (node.accessibilityId === menuRoot) styleSheet(node);
-    else styleMenuRow(node, true);
-  });
+  watch("search.entry", tintIcon);
+  watch("composer", styleComposer);
+  for (const name of toolbarButtons) {
+    watch(name, node => {
+      if (name === "composer.expressions") tintIcon(node);
+      forLive("composer", styleComposer);
+    });
+  }
+  watch(menuMatch, node => styleMenu(node, true));
+  watchers.push(ui.onEvent("focus", event => {
+    if (event.accessibilityId === "composer") {
+      const input = ui.node(event.node);
+      if (input && input.accessibilityId === "composer") styleComposer(input);
+    }
+  }));
   apply(settings.scheme);
   phoenix.onUnload(() => {
     for (const remove of watchers) remove();
