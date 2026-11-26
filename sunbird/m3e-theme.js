@@ -1,5 +1,5 @@
-// @description Rose-toned chat, search and grouped Discord settings with Lampcord-style spacing.
-// @version 0.3.0
+// @description Compact grouped settings and warm rose surfaces for Sunbird.
+// @version 0.4.0
 // @author onichan0923
 
 (() => {
@@ -7,35 +7,63 @@
   // Fixed approximation of the supplied Monet palette: rose A1/A2 and warm N1/N2.
   const palettes = {
     dark: {
-      canvas: 0xff1b1417, sheet: 0xff261c20, row: 0xff38282f, pressed: 0xff523640,
-      field: 0xff483039, ink: 0xffffedf1, muted: 0xffcfb5bd, accent: 0xffefb2c3,
-      onAccent: 0xff49232f, handle: 0xff977880, ripple: 0x28efb2c3,
+      canvas: 0xff22171a, sheet: 0xff291e21, row: 0xff35292c, pressed: 0xff49373e,
+      ink: 0xfff1dfe3, muted: 0xffcfbfc2, accent: 0xffefb3c5,
+      onAccent: 0xff4b2733, track: 0xff715660, handle: 0xff9d858d, ripple: 0x28efb3c5,
     },
     light: {
-      canvas: 0xfffff7f8, sheet: 0xfffff0f3, row: 0xfff5e2e7, pressed: 0xffebcbd4,
-      field: 0xfff1d9e1, ink: 0xff281b20, muted: 0xff71545e, accent: 0xff814e60,
-      onAccent: 0xffffffff, handle: 0xffa7828f, ripple: 0x20814e60,
+      canvas: 0xfffff8f8, sheet: 0xfffcf0f1, row: 0xfff2e6e8, pressed: 0xffe9d5dc,
+      ink: 0xff291c20, muted: 0xff6a555d, accent: 0xff814d5f,
+      onAccent: 0xffffffff, track: 0xffd6b6c2, handle: 0xffa7828f, ripple: 0x20814d5f,
     },
   };
-  const clearFill = { background: 0, borderWidth: 0, borderColor: 0, focusBorderColor: 0 };
+  const clearFill = {
+    background: 0, backgroundGradient: null, activeBackgroundGradient: null,
+    borderWidth: 0, borderColor: 0, focusBorderColor: 0, bgBorderWidth: 0, elevation: 0,
+  };
+  const corners = { outer: 22, inner: 3, gap: 2 };
   const menuRoot = "message.actions.root";
   const menuMatch = { prefix: "message.actions." };
   const settingsMatch = { prefix: "settings.row." };
   const dividerName = /(?:^|[.:_-])(?:divider|separator)(?:$|[.:_-])/i;
   const searchId = "user_settings_search_input";
   const messageMatch = { prefix: "message.content:" };
-  const sendNames = ["composer.send", "Send Message"];
-  const toolNames = ["composer.expressions", "composer.gift", "Record Voice Message", ...sendNames];
+  const sendNames = ["composer.send", "Send", "Send Message", "send-slot", "send-voice-message"];
+  const voiceNames = ["voice-slot", "record-voice-message", "Record Voice Message"];
+  const toolNames = ["composer.expressions", "composer.attachments", "composer.gift", ...voiceNames, ...sendNames];
+  const sidebarMatches = ["navigation.messages", "navigation.add_server", ...[
+    "navigation.channel:", "navigation.category:", "navigation.server:", "dm.row:",
+  ].map(prefix => ({ prefix }))];
+  const headerNames = ["chat-header", "chat-sticky-header", "dm.header"];
+  const detailMatches = ["account-age-group", "notif-in-app", "notif-behavior", "notif-other", "notif-system",
+    "chat-swipe", "chat-media", "chat-camera", "chat-video-quality", "advanced-launch-pad", "contact-sync", "sensitive-content",
+    "friend-request-settings", "build-status-launch-client"];
   const watchers = [];
   const recentGroups = new Map();
+  const switchOwners = new Map();
   let rules = [];
   let palette;
   let lastList = null;
   let lastSettings = null;
   let lastSweep = 0;
+  let draftInput = null;
+  let hasDraft = false;
+  let inferredSend = null;
 
   function parent(node) {
     return node && node.parent != null ? ui.node(node.parent) : null;
+  }
+
+  function children(node) {
+    return node ? node.children.map(id => ui.node(id)).filter(Boolean) : [];
+  }
+
+  function pressable(node) {
+    return node && Array.isArray(node.on) && node.on.includes("press");
+  }
+
+  function shellNode(node) {
+    return node && node.id !== ui.root() && (!node.kind || node.kind === "view" || node.kind === "stack");
   }
 
   function forLive(match, visit) {
@@ -87,7 +115,7 @@
       const name = node.accessibilityId || "";
       if (id === inputId) found = true;
       else if (toolNames.includes(name)) tools.push(node);
-      else if (name && !name.toLowerCase().includes("composer") &&
+      else if (name && name !== "guard-gradient" && !name.toLowerCase().includes("composer") &&
         (id === group.id || node.children.length > 1 || /^(message\.|channel|profile|search\.)/.test(name))) return null;
       for (const child of node.children) todo.push(child);
     }
@@ -108,11 +136,18 @@
     if (!bar) return;
     // Paint only the common outer bar. Clear nested backgrounds along control
     // paths without changing native height, hit targets, padding or flex layout.
-    ui.update(bar.id, { background: palette.field, radius: 18, borderWidth: 0, borderColor: 0 });
+    ui.update(bar.id, { ...clearFill, background: palette.row, radius: 20 });
     let shell = parent(bar);
-    for (let depth = 0; depth < 2 && shell && shell.id !== ui.root() && !shell.accessibilityId
-      && shell.children.length === 1 && (!shell.kind || shell.kind === "view" || shell.kind === "stack"); depth++) {
-      ui.update(shell.id, clearFill);
+    let branch = bar;
+    for (let depth = 0; depth < 3 && shellNode(shell) &&
+        (!shell.accessibilityId || shell.accessibilityId === "composer-floating"); depth++) {
+      const others = children(shell).filter(n => n.id !== branch.id);
+      if (!others.every(n => n.accessibilityId === "guard-gradient" ||
+          (others.length === 1 && shell.children[0] === n.id && (n.kind === "view" || shell.accessibilityId === "composer-floating") &&
+           !n.accessibilityId && !n.children.length && !pressable(n)))) break;
+      for (const decoration of others) ui.update(decoration.id, { ...clearFill, gradient: null, opacity: 0 });
+      ui.update(shell.id, { ...clearFill, background: others.length ? palette.canvas : 0 });
+      branch = shell;
       shell = parent(shell);
     }
     const cleared = new Set();
@@ -122,10 +157,37 @@
         ui.update(n.id, clearFill);
       }
     }
+    const trailing = ui.node(bar.children[bar.children.length - 1]);
+    const anonymousAction = !buttons.some(b => sendNames.includes(b.accessibilityId) || voiceNames.includes(b.accessibilityId))
+      && trailing && !trailing.accessibilityId && iconBranch(trailing) && pressable(trailing) ? trailing : null;
+    if (inferredSend != null && (!anonymousAction || inferredSend !== anonymousAction.id)) {
+      const previous = ui.node(inferredSend);
+      if (previous && !previous.accessibilityId && iconBranch(previous)) paintTool(previous, false);
+      inferredSend = null;
+    }
+    if (anonymousAction) {
+      inferredSend = anonymousAction.id;
+      paintTool(anonymousAction, draftInput === input.id && hasDraft);
+    }
     for (const button of buttons) {
-      const send = sendNames.includes(button.accessibilityId);
-      ui.update(button.id, { background: send ? palette.accent : 0, activeBackground: palette.ripple, radius: 20 });
-      tintIcon(button, send ? palette.onAccent : palette.accent);
+      if (button.accessibilityId === "send-slot" && buttons.some(n => n.id !== button.id && voiceNames.includes(n.accessibilityId))) {
+        paintTool(button, false);
+        continue;
+      }
+      paintTool(button, sendNames.includes(button.accessibilityId));
+    }
+  }
+
+  function paintTool(button, send) {
+    ui.update(button.id, { ...clearFill, background: send ? palette.accent : 0, activeBackground: palette.ripple, radius: 20 });
+    let glyph = button;
+    for (let depth = 0; depth < 4 && glyph.children.length === 1; depth++) {
+      glyph = ui.node(glyph.children[0]);
+      if (!glyph) return;
+      if (send && shellNode(glyph) && glyph.children.length) ui.update(glyph.id, clearFill);
+    }
+    if (glyph.id !== button.id && !glyph.children.length && (!glyph.kind || glyph.kind === "image")) {
+      ui.update(glyph.id, { tint: send ? palette.onAccent : palette.accent });
     }
   }
 
@@ -136,15 +198,19 @@
         frame.children.length !== 1 || frame.children[0] !== row.id || frame.id === ui.root()) return;
     const leading = ui.node(row.children[0]);
     if (!leading) return;
-    ui.update(frame.id, { ...clearFill, background: palette.field, radius: 16 });
+    ui.update(frame.id, { ...clearFill, background: palette.row, radius: 20 });
     ui.update(row.id, clearFill);
     if (leading.kind === "image") ui.update(leading.id, { tint: palette.accent });
     else tintIcon(leading, palette.accent);
   }
 
+  function reaction(id) {
+    return id === "message.actions.add_reaction" || (id || "").startsWith("message.actions.quick_reaction:");
+  }
+
   function action(node) {
     const id = node && node.accessibilityId;
-    return typeof id === "string" && id.startsWith(menuMatch.prefix) && id !== menuRoot && !dividerName.test(id);
+    return typeof id === "string" && id.startsWith(menuMatch.prefix) && id !== menuRoot && !reaction(id) && !dividerName.test(id);
   }
 
   function settingsRow(node) {
@@ -155,10 +221,12 @@
     // Other settings rows can have localized or absent IDs. Only call this
     // matcher inside a settings section established from a settings screen anchor.
     if (node.kind != null && node.kind !== "view") return false;
+    if (node.children.length !== 1 && !pressable(node)) return false;
     const inner = node.children.length === 1 ? ui.node(node.children[0]) : node;
     if (!inner || inner.children.length < 2 || inner.children.length > 4) return false;
     const lead = ui.node(inner.children[0]);
-    if (!lead || lead.children.length || (lead.kind && lead.kind !== "text" && lead.kind !== "image")) return false;
+    if (!lead || (lead.children.length ? !switchParts(node) :
+        lead.kind && lead.kind !== "text" && lead.kind !== "image")) return false;
     return !inner.children.some(id => {
       const child = ui.node(id);
       return child && (child.kind === "input" || child.accessibilityId === searchId);
@@ -192,7 +260,7 @@
     if (recentGroups.size >= 128) recentGroups.clear();
     recentGroups.set(group.id, { signature, time: now });
     if (group.accessibilityId !== menuRoot && group.kind !== "sheet" && kids.every((_, i) => rows[i] || lines[i])) {
-      ui.update(group.id, { background: 0, radius: 20, borderWidth: 0, borderColor: 0 });
+      ui.update(group.id, { background: 0, radius: corners.outer, gap: 0, borderWidth: 0, borderColor: 0 });
     }
     for (let i = 0; i < kids.length; i++) {
       const node = kids[i];
@@ -209,47 +277,116 @@
       const before = rows[i-1] || lines[i-1], after = rows[i+1] || lines[i+1];
       ui.update(node.id, {
         background: palette.row, activeBackground: palette.pressed, borderWidth: 0, borderColor: 0,
-        radiusTopLeft: before ? 5 : 20, radiusTopRight: before ? 5 : 20,
-        radiusBottomLeft: after ? 5 : 20, radiusBottomRight: after ? 5 : 20,
-        margin: [0, 0, 0, after ? 4 : 0],
+        radiusTopLeft: before ? corners.inner : corners.outer, radiusTopRight: before ? corners.inner : corners.outer,
+        radiusBottomLeft: after ? corners.inner : corners.outer, radiusBottomRight: after ? corners.inner : corners.outer,
+        margin: [0, 0, 0, after ? corners.gap : 0],
       });
       if (isRow === settingsRow) tintSettingsRow(node);
     }
     return true;
   }
 
+  function switchParts(row) {
+    const inner = row.children.length === 1 ? ui.node(row.children[0]) : row;
+    const parts = children(inner);
+    if (parts.length < 2 || parts.length > 3) return null;
+    const label = parts[parts.length - 2], wrap = parts[parts.length - 1];
+    if (wrap.children.length !== 1 || !label.children.length || label.children.length > 2) return null;
+    const track = ui.node(wrap.children[0]);
+    if (!shellNode(track) || track.children.length !== 1) return null;
+    const knob = ui.node(track.children[0]);
+    return shellNode(knob) && !knob.children.length ? { track, knob } : null;
+  }
+
+  function tintSwitch(row, toggle, checked) {
+    if (switchOwners.size >= 512) switchOwners.clear();
+    switchOwners.set(row.id, row.id);
+    switchOwners.set(toggle.track.id, row.id);
+    // Some trees expose a Boolean on change; all expose the native thumb
+    // position. Never change accessibilityChecked, translateX or the worklet.
+    const fill = checked === true ? palette.accent : checked === false ? palette.row : palette.track;
+    const edge = checked === false ? palette.muted : palette.accent;
+    const thumb = checked === true ? palette.onAccent : edge;
+    ui.update(toggle.track.id, { background: fill, borderColor: edge, borderWidth: 1 });
+    ui.update(toggle.knob.id, { background: thumb });
+  }
+
   function tintSettingsRow(row) {
-    // Keep semantic colors on account actions, and leave switch tracks alone.
     if (/logout|delete|remove|danger|ログアウト|削除|登出|退出登[錄录]|刪除|删除/i.test(row.accessibilityId || "")) return;
     const inner = row.children.length === 1 ? ui.node(row.children[0]) : row;
     if (!inner || inner.children.length < 2) return;
-    const icon = ui.node(inner.children[0]), title = ui.node(inner.children[1]);
-    if (icon && !icon.children.length && (icon.kind == null || icon.kind === "image")) {
-      ui.update(icon.id, { tint: palette.accent });
-    }
-    if (title && !title.children.length && (title.kind == null || title.kind === "text")) {
-      ui.update(title.id, { color: palette.ink });
+    const parts = children(inner);
+    const toggle = switchParts(row);
+    const accessory = parts.length === 3 && parts[1].children.length === 1 ? ui.node(parts[1].children[0]) : null;
+    const valueRow = accessory && accessory.children.length === 1 && !toggle;
+    const hasIcon = parts[0].kind === "image" || (!parts[0].kind && !parts[0].children.length && parts.length >= 3 && !valueRow);
+    if (hasIcon) ui.update(parts[0].id, { tint: palette.accent });
+    const label = parts[hasIcon ? 1 : 0];
+    const labels = label.children.length ? children(label) : [label];
+    labels.forEach((n, i) => {
+      if (!n.children.length && (!n.kind || n.kind === "text")) {
+        ui.update(n.id, { color: i ? palette.muted : palette.ink });
+      }
+    });
+    if (toggle) {
+      tintSwitch(row, toggle);
+    } else {
+      const arrow = parts[parts.length - 1];
+      if (arrow.children.length === 1) tintIcon(arrow, palette.muted);
     }
   }
 
-  function styleSection(section) {
-    if (!section || !section.children.length || section.children.length > 2) return;
-    const last = section.children[section.children.length - 1];
-    if (!styleGroup(ui.node(last), settingsRow) || section.children.length !== 2) return;
-    const header = ui.node(section.children[0]);
-    if (header && !header.children.length && (header.kind == null || header.kind === "text")) {
-      ui.update(header.id, { color: palette.accent });
+  function styleSection(section, depth = 0) {
+    if (!section || !section.children.length || depth > 3 || section.accessibilityId === searchId) return;
+    const parts = children(section);
+    const group = parts[parts.length - 1], heading = parts[0];
+    const hasHeading = parts.length === 2 && !heading.children.length && (!heading.kind || heading.kind === "text");
+    if ((hasHeading || parts.length === 1) && group && styleGroup(group, settingsRow)) {
+      if (hasHeading) ui.update(heading.id, { color: palette.accent, margin: [0, 0, 0, 6] });
+      return;
+    }
+    // Detail pages may place a row group directly in the scroll content, or
+    // nest whole sections one level deeper. A row contains its own content row.
+    const direct = parts.filter(n => (n.children.length === 1 || pressable(n)) && settingsRow(n));
+    if (direct.length && parts.every(n => direct.includes(n) || divider(n))) {
+      styleGroup(section, settingsRow);
+    } else if (!section.accessibilityId && !pressable(section)) {
+      for (const child of parts) if (shellNode(child) && child.children.length) styleSection(child, depth + 1);
+    }
+  }
+
+  function paintSettingsChrome(scroll) {
+    const body = parent(scroll);
+    if (!shellNode(body) || body.children.length !== 4 || body.children[2] !== scroll.id) return;
+    const [inset, line, ,header] = children(body);
+    if (!shellNode(header) || !header.children.length || !inset || inset.children.length || !line || line.children.length) return;
+    for (const n of [body, inset, line, header]) ui.update(n.id, { background: palette.canvas });
+  }
+
+  function settingsFromTitle(title) {
+    if (!/^settings[-.].+[-.]title$/.test(title.accessibilityId || "")) return;
+    ui.update(title.id, { color: palette.ink });
+    let header = parent(title);
+    for (let depth = 0; depth < 5 && shellNode(header); depth++, header = parent(header)) {
+      const body = parent(header);
+      if (!shellNode(body) || body.children.length !== 4 || body.children[3] !== header.id) continue;
+      const scroll = ui.node(body.children[2]);
+      if (!scroll || scroll.children.length !== 1 || (scroll.kind && scroll.kind !== "scroll")) continue;
+      const list = ui.node(scroll.children[0]);
+      if (list) paintSettingsList(list);
+      return;
     }
   }
 
   function paintSettingsList(list) {
     lastSettings = list.id;
     lastSweep = Date.now();
-    ui.update(list.id, { background: palette.canvas });
+    ui.update(list.id, { background: palette.canvas, gap: 18 });
     const scroll = parent(list);
     if (scroll && scroll.id !== ui.root() && scroll.children.length === 1 &&
         (scroll.kind == null || scroll.kind === "scroll")) {
       ui.update(scroll.id, { background: palette.canvas });
+      paintSettingsChrome(scroll);
     }
     for (const id of list.children) styleSection(ui.node(id));
   }
@@ -291,8 +428,16 @@
     }
   }
 
+  function detailRow(node) {
+    if (node.children.length === 1 && settingsRow(node)) styleSettings(node);
+  }
+
   function styleMenu(node) {
-    if (node.accessibilityId === menuRoot) {
+    if (reaction(node.accessibilityId)) {
+      // This is a horizontal strip of standalone buttons, outside the grouped actions.
+      ui.update(node.id, { background: palette.row, activeBackground: palette.pressed, radius: 999,
+        radiusTopLeft: 999, radiusTopRight: 999, radiusBottomLeft: 999, radiusBottomRight: 999 });
+    } else if (node.accessibilityId === menuRoot) {
       const id = node.kind === "sheet" ? node.id : node.sheet;
       if (id != null) ui.update(id, {
         background: palette.sheet, radiusTopLeft: 24, radiusTopRight: 24,
@@ -301,10 +446,101 @@
     } else styleGroup(parent(node), action);
   }
 
+  function sidebarRow(node) {
+    return /^(?:navigation\.(?:channel:|category:|server:|messages$|add_server$)|dm\.row:)/.test(node.accessibilityId || "");
+  }
+
+  function styleSidebar(node) {
+    const fill = { background: palette.canvas };
+    if (node.list != null && node.list !== ui.root()) {
+      ui.update(node.list, fill);
+      return;
+    }
+    let group = parent(node);
+    for (let depth = 0; depth < 4 && shellNode(group); depth++, group = parent(group)) {
+      if (group.accessibilityId && !/^navigation\./.test(group.accessibilityId)) break;
+      const lanes = children(group);
+      if (lanes.filter(n => sidebarRow(n) || (n.children.length === 1 && children(n).some(sidebarRow))).length >= 2) {
+        ui.update(group.id, fill);
+        const viewport = parent(group);
+        if (viewport && viewport.id !== ui.root() && viewport.children.length === 1) ui.update(viewport.id, fill);
+        return;
+      }
+    }
+  }
+
+  function styleHeader(search) {
+    tintIcon(search, palette.accent);
+    let branch = search;
+    for (let depth = 0; depth < 4; depth++) {
+      const host = parent(branch);
+      if (!shellNode(host) || host.list != null || host.sheet != null ||
+          (host.accessibilityId && !headerNames.includes(host.accessibilityId))) return;
+      const parts = children(host);
+      if (parts.some(n => ["scroll", "list", "navigator"].includes(n.kind) ||
+          /^(?:message\.|composer|chat-list)/.test(n.accessibilityId || ""))) return;
+      if (parts.length > 1) {
+        ui.update(host.id, { background: palette.canvas });
+        const frame = parent(host);
+        if (shellNode(frame) && frame.children.length === 1 && !frame.accessibilityId) ui.update(frame.id, { background: palette.canvas });
+        return;
+      }
+      branch = host;
+    }
+  }
+
+  function cardSurface(n) {
+    ui.update(n.id, { background: palette.row });
+  }
+
+  function styleNamedEmbed(node) {
+    if (!shellNode(node) || !node.children.length || /thumbnail|preview-image|media|footer|author|description|title/i.test(node.accessibilityId)) return;
+    cardSurface(node);
+  }
+
+  function paintEmbeds(content) {
+    // A rich embed has a decorative side stripe beside a column of content.
+    // Photo-only attachments and inline text runs have neither this stripe nor
+    // this layout. Never recolor the stripe or descend into a recognized card.
+    const work = children(content).map(node => [node, 0]);
+    // In compact messages the text anchor and the embed can be siblings. Limit
+    // this second starting point to the rest of the same message's local row.
+    const row = parent(content);
+    if (shellNode(row) && row.id !== content.list && row.id !== content.sheet && row.children.length <= 8 &&
+        (!row.accessibilityId || /^message[.:]/.test(row.accessibilityId))) {
+      const siblings = children(row), index = siblings.findIndex(n => n.id === content.id);
+      if (index >= 0 && !siblings.some(n => n.id !== content.id && (n.accessibilityId || "").startsWith(messageMatch.prefix))) {
+        for (const n of siblings.slice(index + 1)) if (shellNode(n)) work.push([n, 0]);
+      }
+    }
+    let visited = 0;
+    while (work.length && visited++ < 44) {
+      const [node, depth] = work.pop();
+      if (!shellNode(node)) continue;
+      const name = node.accessibilityId || "";
+      if (name.startsWith("embed:")) { styleNamedEmbed(node); continue; }
+      if (name || !node.children.length) continue;
+      const parts = children(node);
+      if (parts.length === 2) {
+        const [stripe, body] = parts;
+        if (shellNode(stripe) && !stripe.accessibilityId && !stripe.children.length && !pressable(stripe) &&
+            shellNode(body) && !body.accessibilityId && body.children.length >= 2 &&
+            children(body).some(n => n.kind === "text" || (shellNode(n) && n.children.length)) &&
+            !parts.some(n => n.kind === "image")) {
+          cardSurface(node);
+          continue;
+        }
+      }
+      if (depth < 3 && !pressable(node)) for (const child of parts) work.push([child, depth + 1]);
+    }
+  }
+
   function styleChat(node) {
-    if (node.list == null || node.list === lastList) return;
-    ui.update(node.list, { background: palette.canvas });
-    lastList = node.list;
+    if (node.list != null && node.list !== lastList) {
+      ui.update(node.list, { background: palette.canvas });
+      lastList = node.list;
+    }
+    paintEmbeds(node);
   }
 
   function apply(choice) {
@@ -313,29 +549,32 @@
     rules = [];
     lastList = lastSettings = null;
     recentGroups.clear();
+    switchOwners.clear();
     const textField = { ...clearFill, radius: 0, color: palette.ink, placeholderColor: palette.muted };
     patch("composer", textField);
     patch(searchId, textField);
     patch("search.entry", { background: 0, activeBackground: palette.ripple, radius: 20, activeRadius: 20.5 });
     patch({ prefix: "message.author:" }, { fontWeight: 700 });
     patch({ prefix: "message.timestamp:" }, { color: palette.muted });
-    forLive("search.entry", node => tintIcon(node, palette.accent));
+    for (const name of headerNames) patch(name, { background: palette.canvas });
+    patch("guard-gradient", { ...clearFill, gradient: null, opacity: 0 });
+    forLive("search.entry", styleHeader);
     forLive("composer", styleComposer);
     forLive(searchId, settingsFromSearch);
     forLive(messageMatch, styleChat);
+    forLive(menuMatch, styleMenu);
+    for (const match of sidebarMatches) forLive(match, styleSidebar);
+    forLive({ prefix: "embed:" }, styleNamedEmbed);
+    forLive({ prefix: "settings-" }, settingsFromTitle);
+    forLive({ prefix: "phoenix-" }, detailRow);
+    for (const name of detailMatches) forLive(name, detailRow);
     const groups = new Set();
-    forLive(menuMatch, node => {
-      if (node.accessibilityId !== menuRoot && groups.has(node.parent)) return;
-      if (node.accessibilityId !== menuRoot) groups.add(node.parent);
-      styleMenu(node);
-    });
     forLive(settingsMatch, node => {
       if (!groups.has(node.parent)) {
         groups.add(node.parent);
         styleSettings(node);
       }
     });
-    forLive("phoenix-Sunbird", styleSettings);
   }
 
   const settings = phoenix.settings.define({
@@ -345,30 +584,57 @@
       onChange: apply,
     },
   });
-  watch("search.entry", node => tintIcon(node, palette.accent));
+  watch("search.entry", styleHeader);
   watch("composer", styleComposer);
   watch(searchId, settingsFromSearch);
   for (const name of toolNames) watch(name, () => forLive("composer", styleComposer));
   watch(menuMatch, styleMenu);
   watch(settingsMatch, styleSettings);
-  watch("phoenix-Sunbird", styleSettings);
+  watch({ prefix: "settings-" }, settingsFromTitle);
+  watch({ prefix: "phoenix-" }, detailRow);
+  for (const name of detailMatches) watch(name, detailRow);
+  for (const match of sidebarMatches) watch(match, styleSidebar);
+  watch({ prefix: "embed:" }, styleNamedEmbed);
   watch(messageMatch, styleChat);
   watchers.push(ui.onEvent("scrollSettle", event => {
     const list = lastSettings == null ? null : ui.node(lastSettings);
     if (list && (event.node === list.id || event.node === list.parent)) {
       paintSettingsList(list);
-    } else if (lastList == null) {
+    } else if (lastList == null || event.node === lastList) {
       forLive(messageMatch, styleChat);
     }
   }));
   watchers.push(ui.onEvent("appeared", event => {
     const name = event.accessibilityId;
-    if (name !== searchId && name !== "composer" && name !== menuRoot) return;
+    if (name !== searchId && name !== "composer" && name !== menuRoot && !toolNames.includes(name)
+        && !/^settings-.+-title$/.test(name || "")) return;
     const node = ui.node(event.node);
     if (!node || node.accessibilityId !== name) return;
     if (name === searchId) settingsFromSearch(node);
     else if (name === "composer") styleComposer(node);
+    else if (toolNames.includes(name)) forLive("composer", styleComposer);
+    else if (name.startsWith("settings-")) settingsFromTitle(node);
     else styleMenu(node);
+  }));
+  watchers.push(ui.onEvent("changeText", event => {
+    if (event.accessibilityId !== "composer") return;
+    const value = typeof event.payload === "string" ? event.payload : event.payload && event.payload.text;
+    if (typeof value !== "string") return;
+    const filled = value.length > 0;
+    if (draftInput === event.node && hasDraft === filled) return;
+    draftInput = event.node;
+    hasDraft = filled;
+    const input = ui.node(event.node);
+    if (input && input.accessibilityId === "composer") styleComposer(input);
+  }));
+  watchers.push(ui.onEvent("change", event => {
+    if (!switchOwners.has(event.node)) return;
+    const row = ui.node(switchOwners.get(event.node)), toggle = row && switchParts(row);
+    if (!toggle || (event.node !== row.id && event.node !== toggle.track.id)) return;
+    const data = event.payload;
+    const checked = typeof data === "boolean" ? data : data &&
+      (typeof data.accessibilityChecked === "boolean" ? data.accessibilityChecked : data.value);
+    if (typeof checked === "boolean") tintSwitch(row, toggle, checked);
   }));
   watchers.push(ui.onEvent("focus", event => {
     const id = event.accessibilityId;
