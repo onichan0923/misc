@@ -1,5 +1,5 @@
-// @description Compact grouped settings and warm rose surfaces for Sunbird.
-// @version 0.5.0
+// @description Material 3 Expressive theme with Android system appearance and dynamic color.
+// @version 0.6.0
 // @author onichan0923
 
 (() => {
@@ -28,7 +28,7 @@
   const dividerName = /(?:^|[.:_-])(?:divider|separator)(?:$|[.:_-])/i;
   const searchId = "user_settings_search_input";
   const messageMatch = { prefix: "message.content:" };
-  const sendNames = ["composer.send", "Send", "Send Message", "send-slot", "send-voice-message"];
+  const sendNames = ["send", "composer.send", "Send", "Send Message", "send-slot", "send-voice-message"];
   const voiceNames = ["voice-slot", "record-voice-message", "Record Voice Message"];
   const toolNames = ["composer.expressions", "composer.attachments", "composer.gift", ...voiceNames, ...sendNames];
   const sidebarMatches = ["navigation.messages", "navigation.add_server", ...[
@@ -45,7 +45,33 @@
   const switchSkins = new Map();
   const detailLists = new Map();
   let rules = [];
-  let palette;
+  let palette, activeDark, selectedScheme;
+  const appearance = phoenix.appearance;
+  let system = appearance && appearance.get ? appearance.get() : null;
+
+  function mix(first, second, fraction) {
+    const channel = shift => Math.round(((first >>> shift) & 255) * (1 - fraction) + ((second >>> shift) & 255) * fraction);
+    return (0xff000000 | channel(16) << 16 | channel(8) << 8 | channel(0)) >>> 0;
+  }
+
+  function colorsFor(dark) {
+    const fallback = dark ? palettes.dark : palettes.light;
+    const scales = system && system.monet;
+    if (!scales) return fallback;
+    const { accent1: a, neutral1: n, neutral2: v } = scales;
+    const valid = (scale, tones) => scale && tones.every(tone => Number.isInteger(scale[tone]) && (scale[tone] >>> 24) === 255);
+    if (!valid(a, [100, 200, 400, 600, 700, 800]) || !valid(n, [0, 10, 100, 800, 900, 1000]) ||
+        !valid(v, [50, 100, 200, 300, 400, 500, 600, 700, 800, 900])) return fallback;
+    const accent = dark ? a[200] : a[600];
+    return {
+      canvas: dark ? mix(n[900], n[1000], 0.28) : mix(n[10], n[0], 0.30),
+      sheet: dark ? n[900] : v[50], row: dark ? mix(v[900], v[800], 0.55) : v[100],
+      pressed: dark ? mix(v[800], a[400], 0.15) : mix(v[100], a[400], 0.18),
+      ink: dark ? n[100] : n[900], muted: dark ? v[200] : v[700],
+      accent, onAccent: dark ? a[800] : n[0], track: dark ? v[600] : v[300],
+      handle: dark ? v[400] : v[500], ripple: ((accent & 0xffffff) | (dark ? 0x28000000 : 0x20000000)) >>> 0,
+    };
+  }
   let lastList = null;
   let lastSettings = null;
   let lastSweep = 0;
@@ -53,6 +79,8 @@
   let hasDraft = false;
   let inferredSend = null;
   let pickedMessage = null, editingMessage = null, editLayer = null, pendingDialog = 0;
+  const menuTargets = new Map();
+  let joinedBar = null;
   let dialogWatch = null;
   const seenPanels = new Map();
   const layouts = new Map();
@@ -69,7 +97,7 @@
   function applyNativePalette(force = false) {
     if (!palette || !phoenix.bridge || typeof phoenix.bridge.invoke !== "function") return;
     if (!force && nativeScheme === palette && Date.now() - lastNativeAt < 1200) return;
-    const dark = palette === palettes.dark;
+    const dark = activeDark;
     const colors = { dark, lightBarIcons: dark, background: palette.canvas, surface: palette.row, surfaceHigh: palette.sheet,
       border: palette.track, pressed: palette.pressed, ripple: palette.ripple, raised: palette.row, raisedBorder: palette.track,
       brand: palette.accent, brandText: palette.onAccent, sliderTrack: palette.track, textMuted: palette.muted,
@@ -203,6 +231,20 @@
     }
   }
 
+  function barRadii(top, bottom) {
+    return { radius: 0, radiusTopLeft: top, radiusTopRight: top,
+      radiusBottomLeft: bottom, radiusBottomRight: bottom };
+  }
+
+  function commonFrame(a, b) {
+    const chain = new Set();
+    for (let i = 0; a && a.id !== ui.root() && i < 9; a = parent(a), i++) chain.add(a.id);
+    for (let i = 0; b && b.id !== ui.root() && i < 9; b = parent(b), i++) {
+      if (chain.has(b.id)) return b;
+    }
+    return null;
+  }
+
   function styleComposer(input) {
     applyNativePalette();
     let group = parent(input), bar = null, buttons = [];
@@ -219,7 +261,9 @@
     rememberLayout("composer", parent(parent(bar)) || parent(bar) || bar);
     // Paint only the common outer bar. Clear nested backgrounds along control
     // paths without changing native height, hit targets, padding or flex layout.
-    ui.update(bar.id, { ...flat, background: palette.row, radius: 20 });
+    const cancel = ui.find(contextCancel).map(id => ui.node(id)).find(n => n && commonFrame(n, bar));
+    ui.update(bar.id, { ...flat, background: palette.row, ...barRadii(cancel ? 0 : 20, 20) });
+    if (cancel) joinedBar = { bar: bar.id, cancel: cancel.id };
     paintDock(bar);
     const cleared = new Set();
     for (const control of [input, ...buttons]) {
@@ -405,8 +449,21 @@
         margin: [0, 0, 0, after ? corners.gap : 0],
       });
       if (isRow === settingsRow) tintSettingsRow(node);
+      if (isRow === menuRow) tintMenuIcon(node, kids);
     }
     return true;
+  }
+
+  function tintMenuIcon(row, group) {
+    const aid = row.accessibilityId || "";
+    if (/(?:delete|remove|report|block|ban|kick|削除|刪除|删除)/i.test(aid)) return;
+    if (!action(row) && group.some(n => n && n.accessibilityId === "message.actions.delete")) return;
+    let lane = row;
+    for (let d = 0; lane && lane.children.length === 1 && d < 3; d++) lane = ui.node(lane.children[0]);
+    if (!lane || lane.children.length < 2 || lane.children.length > 3) return;
+    let icon = ui.node(lane.children[0]);
+    for (let d = 0; icon && icon.children.length === 1 && d < 2; d++) icon = ui.node(icon.children[0]);
+    if (icon && !icon.children.length && (!icon.kind || icon.kind === "image")) ui.update(icon.id, { tint: palette.accent });
   }
 
   function switchParts(row) {
@@ -440,15 +497,17 @@
     const existing = switchSkins.get(track.id);
     if (existing && existing.knob === knob.id) return;
     if (existing) for (const remove of existing.remove) remove();
-    const off = palette.row, on = palette.accent;
-    const face = switchFace({ width: 56, height: 32, radius: 16,
-      background: off, borderWidth: 2, borderColor: palette.handle });
-    // The native thumb moves 28dp. A paint-only strip attached to that thumb
-    // fills the clipped rail as it travels, including on initial mount. Its
-    // position always comes from Discord, even for switches without JS events.
+    const off = palette.track, on = palette.accent;
+    // In a 56dp rail the thumb's center travels from 14 to 42. The stationary
+    // halves plus the two moving covers give a solid rail at BOTH endpoints.
+    // The 28dp uncovered window stays centered on the native thumb.
+    const face = switchFace({ width: 56, height: 32, radius: 16, clip: true, background: off }, [
+      switchFace({ width: 28, height: 32, translateX: 14, background: on }),
+    ]);
     const art = [
-      switchFace({ width: 112, height: 32, translateX: -56, background: on }),
-      switchFace({ width: 22, height: 22, radius: 11, borderWidth: 2, borderColor: on, background: palette.ink }),
+      switchFace({ width: 56, height: 32, translateX: -42, background: on }),
+      switchFace({ width: 56, height: 32, translateX: 42, background: off }),
+      switchFace({ width: 22, height: 22, radius: 11, background: palette.ink }),
     ];
     const base = ui.mount(track.id, face, { before: knob.id });
     const cap = ui.mount(knob.id, switchFace({ width: 20, height: 20, clip: false }, art));
@@ -470,7 +529,7 @@
     const edge = checked === false ? palette.muted : palette.accent;
     const thumb = checked === true ? palette.onAccent : edge;
     ui.update(toggle.track.id, { width: 56, height: 32, radius: 16, clip: true, align: "center",
-      padding: [4, 0, 4, 0], background: fill, borderColor: edge, borderWidth: 1 });
+      padding: [4, 0, 4, 0], background: fill, borderColor: edge, borderWidth: ui.mount ? 0 : 1 });
     ui.update(toggle.knob.id, { width: 20, height: 20, radius: 10, clip: false, background: thumb });
     skinSwitch(toggle.track, toggle.knob);
   }
@@ -483,7 +542,12 @@
     const toggle = switchParts(row);
     const accessory = parts.length === 3 && parts[1].children.length === 1 ? ui.node(parts[1].children[0]) : null;
     const valueRow = accessory && accessory.children.length === 1 && !toggle;
-    const hasIcon = parts[0].kind === "image" || (!parts[0].kind && !parts[0].children.length && parts.length >= 3 && !valueRow);
+    const leading = parts[0], second = parts[1];
+    const twoPartIcon = parts.length === 2 && !toggle && !(
+      !second.children.length && second.kind === "image"
+    ) && (!second.children.length || children(second).every(n => !n.children.length && (!n.kind || n.kind === "text")));
+    const hasIcon = leading.kind === "image" || (!leading.kind && !leading.children.length && !valueRow &&
+      (parts.length >= 3 || twoPartIcon));
     if (hasIcon) ui.update(parts[0].id, { tint: palette.accent });
     const label = parts[hasIcon ? 1 : 0];
     const labels = label.children.length ? children(label) : [label];
@@ -496,7 +560,7 @@
       tintSwitch(row, toggle);
     } else {
       const arrow = parts[parts.length - 1];
-      if (arrow.children.length === 1) tintIcon(arrow, palette.muted);
+      if (arrow !== label && arrow.children.length === 1) tintIcon(arrow, palette.muted);
     }
   }
 
@@ -695,6 +759,15 @@
   }
 
   function styleMenu(node) {
+    if (["message.actions.edit", "message.actions.delete", "message.actions.reply"].includes(node.accessibilityId)) {
+      if (menuTargets.size > 120) menuTargets.clear();
+      const pending = [node];
+      for (let i = 0; pending.length && i < 16; i++) {
+        const item = pending.pop();
+        menuTargets.set(item.id, node.accessibilityId);
+        pending.push(...children(item));
+      }
+    }
     if (reaction(node.accessibilityId)) {
       // This is a horizontal strip of standalone buttons, outside the grouped actions.
       ui.update(node.id, { background: palette.row, activeBackground: palette.pressed, radius: 999,
@@ -748,30 +821,49 @@
     }
   }
 
+  const dockSlots = ["panels-dock-slot", "main-tabs-screen-dock-slot", "main-tabs-over-stack-dock-slot", "over-stack-dock-slot"];
+  function paintUserDock(dock, named = false) {
+    const queue = [[dock, 0]];
+    for (let budget = 75; queue.length && budget > 0; budget--) {
+      const [n, depth] = queue.shift();
+      if (!shellNode(n) || n.sheet != null || n.list != null || !n.children.length ||
+          /^(?:composer|message\.|navigation\.|guild\.|chat-header|search.entry|settings)/.test(n.accessibilityId || "")) continue;
+      const parts = children(n);
+      if (parts.length > 6 || contains(n, c => c.kind === "list" || c.kind === "scroll" || sidebarRow(c), 2)) continue;
+      const hasIdentity = c => contains(c, leaf =>
+        /avatar|current.user|user.profile|user.status/i.test(leaf.accessibilityId || "") ||
+        (leaf.kind === "image" && !leaf.children.length), 3);
+      const namedEnd = c => contains(c, leaf => /notif|inbox|bell/i.test(leaf.accessibilityId || ""), 3);
+      const end = parts[parts.length - 1];
+      if (parts.length >= 2 && (named || namedEnd(end) || pressable(end)) &&
+          parts.slice(0, -1).some(hasIdentity)) {
+        ui.update(n.id, { ...clearFill, background: palette.row });
+        if (shellNode(end)) ui.update(end.id, { background: palette.sheet });
+        return true;
+      }
+      if (depth < 4) for (const child of parts) queue.push([child, depth + 1]);
+    }
+    return false;
+  }
+
   function paintChannelPane(list) {
     if (!list || Date.now() - (seenPanels.get(list.id) || 0) < 180) return;
-    if (seenPanels.size > 64) seenPanels.clear();
+    if (seenPanels.size >= 64) seenPanels.clear();
     seenPanels.set(list.id, Date.now());
+    const head = ui.find("guild.menu").map(id => ui.node(id)).find(n => n && commonFrame(n, list));
+    if (!head) return;
+    const pane = commonFrame(head, list);
+    rememberLayout("channel-pane", pane);
+    if (shellNode(pane)) ui.update(pane.id, { background: palette.canvas });
+    styleGuildHeader(head);
+    for (const key of dockSlots) forLive(key, n => paintUserDock(n, true));
     let lane = list;
-    for (let i = 0; i < 4; i++) {
-      const panel = parent(lane);
-      if (!shellNode(panel) || panel.children.length > 5 || panel.sheet != null) return;
-      const parts = children(panel), at = parts.findIndex(n => n.id === lane.id);
-      const first = parts.slice(0, at), last = parts.slice(at + 1);
-      const hasGuildHeader = first.some(n => contains(n, c => ["guild.menu", "guild-title", "guild-search"].includes(c.accessibilityId), 4));
-      if (hasGuildHeader) {
-        rememberLayout("channel-pane", panel);
-        ui.update(panel.id, { background: palette.canvas });
-        for (const head of first) if (shellNode(head)) ui.update(head.id, { background: palette.canvas });
-        for (const foot of last) {
-          if (!shellNode(foot) || !foot.children.length ||
-              contains(foot, n => /^(?:message\.|composer|navigation\.)/.test(n.accessibilityId || ""))) continue;
-          ui.update(foot.id, { background: palette.row });
-          if (foot.children.length === 1 && shellNode(ui.node(foot.children[0]))) ui.update(foot.children[0], { background: palette.row });
-        }
-        return;
-      }
-      lane = panel;
+    for (let i = 0; i < 7; i++) {
+      const frame = parent(lane);
+      if (!frame || frame.id === ui.root() || frame.sheet != null || frame.kind === "navigator") break;
+      const parts = children(frame), at = frame.children.indexOf(lane.id);
+      if (parts.length <= 7) for (const sibling of parts.slice(at + 1)) if (paintUserDock(sibling)) return;
+      lane = frame;
     }
   }
 
@@ -885,13 +977,18 @@
     if (editLayer) editLayer.remove();
     editLayer = null;
     editingMessage = null;
+    if (joinedBar) {
+      const bar = ui.node(joinedBar.bar);
+      if (bar) ui.update(bar.id, barRadii(20, 20));
+      joinedBar = null;
+    }
   }
 
   function styleContext(cancel) {
     let lane = parent(cancel);
     for (let i = 0; i < 3 && shellNode(lane) && lane.children.length === 1; i++) lane = parent(lane);
     if (!shellNode(lane) || lane.children.length > 4 || contains(lane, n => n.accessibilityId === "composer")) return;
-    ui.update(lane.id, { ...flat, background: palette.row });
+    ui.update(lane.id, { ...flat, background: palette.row, ...barRadii(20, 0) });
     for (const n of children(lane)) {
       if (n.id === cancel.id || contains(n, c => c.id === cancel.id)) continue;
       const label = n.children.length === 1 ? ui.node(n.children[0]) : n;
@@ -900,26 +997,55 @@
     tintIcon(cancel, palette.accent);
     const frame = parent(lane);
     rememberLayout("edit-bar", frame);
-    if (shellNode(frame) && contains(frame, n => n.accessibilityId === "composer", 5)) {
-      ui.update(frame.id, { ...flat, background: palette.row, radius: 20 });
-      paintDock(frame);
+    if (shellNode(frame) && frame.children.length === 2 && frame.children[0] === lane.id) {
+      const divider = ui.node(frame.children[1]);
+      if (divider && !divider.accessibilityId && !divider.children.length && shellNode(divider)) {
+        ui.update(frame.id, { ...flat, background: palette.row, ...barRadii(20, 0) });
+        ui.update(divider.id, { ...flat, height: 0, minHeight: 0, opacity: 0 });
+      }
     }
-    if (editingMessage) forLive("composer", input => {
-      if (!contains(frame, n => n.id === input.id, 6) || draftInput === input.id) return;
-      draftInput = input.id;
-      hasDraft = true;
+    forLive("composer", input => {
+      if (!commonFrame(lane, input)) return;
+      if (editingMessage) { draftInput = input.id; hasDraft = true; }
       styleComposer(input);
     });
-    if (!editingMessage || !ui.mount) return;
-    forLive("message.content:" + editingMessage, content => {
-      if (content.list == null) return;
-      let row = content;
-      for (let i = 0; i < 12 && row && row.parent !== content.list; i++) row = parent(row);
-      if (!row || row.parent !== content.list || (editLayer && editLayer.row === row.id)) return;
-      if (editLayer) editLayer.remove();
-      const remove = ui.mount(row.id, switchFace({ width: "fill", height: "fill", background: palette.pressed }), { before: "start" });
-      editLayer = { row: row.id, cancel: cancel.id, remove };
-    });
+    paintEditedMessage(cancel);
+  }
+
+  const messageAnchors = ["content", "author", "avatar", "timestamp"];
+  function paintEditedMessage(cancel) {
+    if (!editingMessage || !ui.mount || !cancel) return;
+    for (const type of messageAnchors) {
+      const anchors = ui.find("message." + type + ":" + editingMessage);
+      for (const id of anchors) {
+        const anchor = ui.node(id);
+        if (!anchor || anchor.list == null) continue;
+        let row = anchor;
+        for (let i = 0; i < 14 && row && row.parent !== anchor.list; i++) row = parent(row);
+        if (!row || row.parent !== anchor.list) continue;
+        if (editLayer && editLayer.row === row.id && editLayer.anchor === anchor.id) return;
+        if (editLayer) editLayer.remove();
+        const removes = [];
+        const highlight = host => {
+          const layers = children(host);
+          let before = "start";
+          for (let i = 0; i + 1 < layers.length; i++) {
+            const n = layers[i];
+            const decoration = n.kind === "view" && !n.accessibilityId && !n.children.length && !pressable(n);
+            if (!decoration && !/^(?:message[.-])?(?:background|highlight)$/.test(n.accessibilityId || "")) break;
+            before = layers[i + 1].id;
+          }
+          removes.push(ui.mount(host.id, switchFace({ width: "fill", height: "fill", background: palette.pressed }), { before }));
+        };
+        if (row.id === anchor.id) highlight(row);
+        for (let host = parent(anchor), i = 0; row.id !== anchor.id && host && i < 14; host = parent(host), i++) {
+          if (shellNode(host) && (host.id === row.id || host.children.length > 1)) highlight(host);
+          if (host.id === row.id) break;
+        }
+        editLayer = { row: row.id, anchor: anchor.id, cancel: cancel.id, remove: () => { for (const remove of removes) remove(); } };
+        return;
+      }
+    }
   }
 
   function buttonLabel(button) {
@@ -934,12 +1060,16 @@
     if (parts.length < 2 || parts.length > 9) return false;
     const last = parts[parts.length - 1], foot = children(last);
     const actions = foot.length === 2 && foot.every(buttonLabel) ? foot : parts.slice(-2);
-    const heading = n => n && (!n.children.length ? !n.kind || n.kind === "text" : !!buttonLabel(n));
-    if (!heading(parts[0]) || !actions.every(buttonLabel) || actions[0] === parts[0]) return false;
+    if (actions.length !== 2 || !actions.every(buttonLabel) || actions.includes(parts[0])) return false;
+    const heading = parts[0];
+    if (!contains(heading, n => !n.children.length && (!n.kind || n.kind === "text"), 3)) return false;
     rememberLayout("confirmation", card);
-    ui.update(card.id, { background: palette.sheet, radius: 24 });
+    ui.update(card.id, { ...flat, background: palette.sheet, ...barRadii(24, 24) });
+    if (actions === foot) ui.update(last.id, { background: 0 });
     actions.forEach((n, i) => {
-      ui.update(n.id, { background: i ? palette.row : palette.accent, radius: 18, activeBackground: palette.pressed });
+      ui.update(n.id, { ...clearFill, background: i ? palette.row : palette.accent, ...barRadii(18, 18), activeBackground: palette.pressed });
+      const label = buttonLabel(n);
+      for (let inner = parent(label); inner && inner.id !== n.id; inner = parent(inner)) ui.update(inner.id, clearFill);
       ui.update(buttonLabel(n).id, { color: i ? palette.ink : palette.onAccent });
     });
     return true;
@@ -966,12 +1096,12 @@
     dialogWatch = ui.onNode({ prefix: "" }, event => {
       if (Date.now() > pendingDialog) { finishDialogWatch(); return; }
       const n = ui.node(event.id);
-      if (n && n.list == null && n.sheet == null) maybeDialog(n);
+      if (n && n.list == null && !menuAncestor(n)) maybeDialog(n);
     });
     forLive("delete-message", maybeDialog);
-    if (pendingDialog && pickedMessage) forLive("message.content:" + pickedMessage, n => {
-      if (n.list == null && n.sheet == null) maybeDialog(n);
-    });
+    if (pendingDialog && pickedMessage) for (const type of messageAnchors) {
+      forLive("message." + type + ":" + pickedMessage, n => { if (n.list == null) maybeDialog(n); });
+    }
   }
 
   function styleChat(node) {
@@ -981,12 +1111,18 @@
       paintCallRows(ui.node(node.list));
     }
     paintEmbeds(node);
+    if (editingMessage && node.accessibilityId === "message.content:" + editingMessage) forLive(contextCancel, paintEditedMessage);
   }
 
   function apply(choice) {
+    selectedScheme = choice;
+    const dark = choice === "light" ? false : choice === "dark" ? true : !(system && system.dark === false);
+    const next = colorsFor(dark);
+    if (palette && activeDark === dark && Object.keys(next).every(k => next[k] === palette[k])) return;
+    activeDark = dark;
     removeSkins(true);
     if (editLayer) { editLayer.remove(); editLayer = null; }
-    palette = choice === "light" ? palettes.light : palettes.dark;
+    palette = next;
     applyNativePalette(true);
     for (const remove of rules) remove();
     rules = [];
@@ -1012,6 +1148,9 @@
     forLive(menuMatch, styleMenu);
     forLive({ prefix: "phoenix." }, n => { if (menuAncestor(n)) styleMenu(n); });
     for (const match of sidebarMatches) forLive(match, styleSidebar);
+    for (const key of dockSlots) forLive(key, n => paintUserDock(n, true));
+    forLive("delete-message", maybeDialog);
+    forLive({ prefix: "alert-title:" }, maybeDialog);
     forLive({ prefix: "embed:" }, styleNamedEmbed);
     forLive({ prefix: "settings-" }, settingsFromTitle);
     forLive({ prefix: "phoenix-" }, detailRow);
@@ -1027,8 +1166,8 @@
 
   const settings = phoenix.settings.define({
     scheme: {
-      type: "select", title: "玫瑰配色", description: "玫瑰灰背景與豆沙粉強調色。選擇與 Discord 外觀搭配的明暗。",
-      default: "dark", options: [{ value: "dark", label: "深色" }, { value: "light", label: "淺色" }],
+      type: "select", title: "外觀", description: "支援系統外觀的 Sunbird 可跟隨系統深淺，Android 12 以上使用系統莫奈色板。無色板時使用玫瑰配色。",
+      default: "system", options: [{ value: "system", label: "跟隨系統" }, { value: "dark", label: "深色" }, { value: "light", label: "淺色" }],
       onChange: apply,
     },
     inspect: {
@@ -1038,18 +1177,20 @@
     },
     copyLayout: {
       type: "button", title: "複製介面結構",
-      onPress: () => phoenix.ui.copy(JSON.stringify({ version: "0.5.0", layouts: Object.fromEntries(layouts) })),
+      onPress: () => phoenix.ui.copy(JSON.stringify({ version: "0.6.0", layouts: Object.fromEntries(layouts) })),
     },
   });
   recordLayouts = settings.inspect === true;
   function styleGuildHeader(node) {
     let n = node;
-    for (let i = 0; i < 3 && shellNode(n); i++, n = parent(n)) {
-      if (n.list != null || n.sheet != null || contains(n, c => sidebarRow(c), 2)) break;
-      ui.update(n.id, { background: palette.canvas });
-      if (n.children.length > 1 && i > 0) { paintTopInset(n); break; }
+    for (let i = 0; i < 5 && shellNode(n); i++, n = parent(n)) {
+      if (n.list != null || n.sheet != null || contains(n, c => sidebarRow(c) || c.kind === "list" || c.kind === "scroll", 2)) break;
+      paintTopInset(n);
+      ui.update(n.id, { background: palette.sheet });
+      if (n.children.length > 1 && i > 0) break;
     }
   }
+  for (const slot of dockSlots) watch(slot, n => paintUserDock(n, true));
   watch("guild.menu", styleGuildHeader);
   for (const name of headerNames) watch(name, paintTopInset);
   watch(contextCancel, styleContext);
@@ -1069,12 +1210,17 @@
   watch({ prefix: "embed:" }, styleNamedEmbed);
   watch(messageMatch, n => { styleChat(n); if (pendingDialog > Date.now() && n.list == null && n.sheet == null) maybeDialog(n); });
   watchers.push(ui.onEvent("rowLongPress", e => { pickedMessage = e.messageId || null; }));
+  watchers.push(ui.onEvent("longPress", e => {
+    const match = /^message\.(?:content|author|avatar|timestamp):(\d+)$/.exec(e.accessibilityId || "");
+    if (e.messageId || match) pickedMessage = e.messageId || match[1];
+  }));
   watchers.push(ui.onEvent("press", e => {
-    if (e.accessibilityId === "message.actions.edit") {
+    const target = e.accessibilityId || menuTargets.get(e.node);
+    if (target === "message.actions.edit") {
       clearEditing();
       editingMessage = e.messageId || pickedMessage;
       forLive(contextCancel, styleContext);
-    } else if (e.accessibilityId === "message.actions.delete") {
+    } else if (target === "message.actions.delete") {
       awaitDialog();
     } else if (e.accessibilityId === contextCancel || sendNames.includes(e.accessibilityId) || e.node === inferredSend) {
       clearEditing();
@@ -1082,6 +1228,10 @@
   }));
   watchers.push(ui.onEvent("submit", e => { if (e.accessibilityId === "composer") clearEditing(); }));
   watchers.push(ui.onEvent("scrollSettle", event => {
+    if (editingMessage) forLive(contextCancel, paintEditedMessage);
+    if (joinedBar && !ui.node(joinedBar.cancel)) clearEditing();
+    const scrolled = ui.node(event.node);
+    if (scrolled && ui.find("guild.menu").length) paintChannelPane(scrolled);
     const list = lastSettings == null ? null : ui.node(lastSettings);
     if (list && (event.node === list.id || event.node === list.parent)) {
       paintSettingsList(list);
@@ -1094,10 +1244,10 @@
     const name = event.accessibilityId;
     if (pendingDialog > Date.now()) {
       const candidate = ui.node(event.node);
-      if (candidate && candidate.list == null && candidate.sheet == null &&
-          (candidate.kind === "modal" || /^delete-message$|^alert-|^message\.(content|author):/.test(name || ""))) maybeDialog(candidate);
+      if (candidate && candidate.list == null && !menuAncestor(candidate) &&
+          (candidate.kind === "modal" || /^delete-message$|^alert-|^message\.(content|author|avatar|timestamp):/.test(name || ""))) maybeDialog(candidate);
     }
-    if (editLayer && !ui.node(editLayer.cancel)) clearEditing();
+    if (joinedBar && !ui.node(joinedBar.cancel)) clearEditing();
     if (name !== searchId && name !== "composer" && name !== menuRoot && !toolNames.includes(name)
         && !/^settings-.+-title$/.test(name || "")) return;
     const node = ui.node(event.node);
@@ -1134,11 +1284,15 @@
     const node = ui.node(event.node);
     if (node && node.accessibilityId === id) (id === searchId ? styleSearch : styleComposer)(node);
   }));
-  apply(settings.scheme);
+  if (appearance && typeof appearance.onChange === "function") {
+    watchers.push(appearance.onChange(value => { system = value; apply(selectedScheme); }));
+    system = appearance.get();
+  }
+  apply(settings.scheme || "system");
   phoenix.onUnload(() => {
     // Omitting the optional background clears the host's cached startup
     // color. Discord supplies its current native palette on the next launch.
-    if (nativeScheme && phoenix.bridge) phoenix.bridge.invoke(9, 84, { [hostTheme.dark]: nativeScheme === palettes.dark });
+    if (nativeScheme && phoenix.bridge) phoenix.bridge.invoke(9, 84, { [hostTheme.dark]: activeDark });
     finishDialogWatch();
     removeSkins(true);
     clearEditing();
