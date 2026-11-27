@@ -1,9 +1,16 @@
 // @description Use Android's system sans-serif for text across the Phoenix mobile UI.
-// @version 0.2.0
+// @version 0.3.0
 // @author onichan0923
 
 (() => {
   const ui = phoenix.ui;
+  // The native hook also sees inline runs and labels created after navigation.
+  // The runtime releases this plugin's font override on unload.
+  if (typeof ui.useSystemFont === "function") {
+    ui.useSystemFont();
+    return;
+  }
+
   const font = { fontFamily: "sans-serif" };
   const anyNamed = { prefix: "" };
   const fields = ["composer", "user_settings_search_input", "settings-account-title"];
